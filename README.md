@@ -489,7 +489,214 @@ server.error.whitelabel.enabled=true
 
 ## API 예외 처리
 ### 시작
+앞서 서블릿 예외처리에 대해서 배웠다. 
+
+그렇다면.
+API 예외 처리는 어떻게 해야할까?
+
+HTML 페이지의 경우 4xx, 5xx와 같은 오류 페이지만 있으면 대부분의 문제를 해결할 수 있다.
+그런데 API의 경우에는 생각할 내용이 훨씬 많다..!
+
+왜냐하면, 오류페이지의 경우 단순히 고객에게 오류페이지만 보여주고 끝이지만
+**API는 각 상황에 맞는 오류 응답 스펙을 정하고, JSON으로 데이터를 내려주어야 한다.**
+
+먼저 서블릿 오류 페이지 방식을 사용해서 API예외를 처리해 보자..!🤗
+```java
+@Component
+public class WebServerCustomizer implements WebServerFactoryCustomizer<ConfigurableWebServerFactory> {
+  @Override
+  public void customize(ConfigurableWebServerFactory factory) {
+    ErrorPage errorPage404 = new ErrorPage(HttpStatus.NOT_FOUND, "/error-page/404");
+    ErrorPage errorPage500 = new ErrorPage(HttpStatus.INTERNAL_SERVER_ERROR, "/error-page/500");
+    ErrorPage errorPageEx = new ErrorPage(RuntimeException.class, "/error-page/500");
+
+    factory.addErrorPages(errorPage404, errorPage500, errorPageEx);
+  }
+}
+```
+`WAS`에 예외가 전달되거나, `response.sendError()` 가 호출되면 위에 등록한 예외 페이지 경로가 호출된다.
+<br><br>
+
+**ApiExceptionController - API 예외 컨트롤러**
+
+예외 테스트를 위해 URL에 전달된 id 의 값이 ex 이면 예외가 발생하도록 코드를 심어두었다.
+
+`HTTP Header`에 `Accept` 가 `application/json` 인 것을 반드시 확인`!!!!!!!!!!`
+```java
+@Slf4j
+@RestController
+public class ApiExceptionController {
+
+    @GetMapping("/api/members/{id}")
+    public MemberDto getMember(@PathVariable("id") String id) {
+        if(id.equals("ex")) {
+            throw new RuntimeException("잘못된 사용자");
+        }
+        if(id.equals("bad")) {
+            throw new IllegalArgumentException("잘못된 입력 값");
+        }
+        if(id.equals("user-ex")) {
+            throw new UserException("사용자 오류");
+        }
+        return new MemberDto(id, "hello "+id);
+    }
+
+    @Data
+    @AllArgsConstructor
+    static class MemberDto {
+        private String memberId;
+        private String name;
+    }
+}
+```
+
+이렇게 코드를 작성한뒤 API를 요청하면,
+
+* 정상의 경우 
+  * API로 JSON 형식으로 데이터가 정상반환 된다.
+* 오류인 경우
+  * HTML 오류 페이지 반환
+
+우리는 웹 브라우저아닌 이상 HTML을 직접 받아서 할 수 있는 것을 별로 없다..
+따라서 **`JSON 응답`을 할 수 있도록 수정해야 한다.**
+
+**ErrorPageController - API 응답 추가**
+```java
+@Slf4j
+@Controller
+public class ErrorPageController {
+    
+    @RequestMapping(value = "/error-page/500", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> errorPage500Api(
+            HttpServletRequest request, HttpServletResponse response) {
+      log.info("API errorPage500");
+  
+      Map<String, Object> result = new HashMap<>();
+      Exception ex = (Exception) request.getAttribute(RequestDispatcher.ERROR_EXCEPTION);
+      result.put("status", request.getAttribute(RequestDispatcher.ERROR_STATUS_CODE));
+      result.put("message", ex.getMessage());
+  
+      Integer statusCode = (Integer) request.getAttribute(RequestDispatcher.ERROR_STATUS_CODE);
+  
+      return new ResponseEntity<>(result, HttpStatus.valueOf(statusCode));
+    }
+}
+```
+`produces = MediaType.APPLICATION_JSON_VALUE` 의 뜻은 클라이언트가 요청하는 HTTP Header의
+Accept 의 값이 application/json 일 때 해당 메서드가 호출된다는 것이다. 
+결국 클라어인트가 받고 싶은 미디어타입이 JSON 이에 이 컨트롤러의 메서드가 호출된다.
+
+`http://localhost:8080/api/members/ex`
+
+![img_3.png](img_3.png)
+
+**동작 순서**
+```text
+1. WAS(/api/members/ex, Accept: application/json) -> 필터 -> 서블릿 -> 인터셉터 -> 컨트롤러
+2. WAS(여기까지 전파) <- 필터 <- 서블릿 <- 인터셉터 <- 컨트롤러(RuntimeException 예외발생)
+3. WAS 오류 페이지 확인
+4. WAS(/error-page/500) -> 필터(x) -> 서블릿 -> 인터셉터(x) -> 컨트롤러(/error-page/500, HTTP 메시지 컨버터(ReturnValueHandler))
+```
 ### 스프링 부트 기본 오류 처리
+API 예외 처리도 스프링 부트가 제공하는 기본 오류 방식을 사용할 수 있다.
+
+스프링 부트가 제공하는 `BasicErrorController` 코드를 보자.
+<br><br>
+
+**BasicErrorController**
+```java
+@Controller
+@RequestMapping("${server.error.path:${error.path:/error}}")
+public class BasicErrorController extends AbstractErrorController {
+
+    private final ErrorProperties errorProperties;
+  
+    public BasicErrorController(ErrorAttributes errorAttributes, ErrorProperties errorProperties,
+                                List<ErrorViewResolver> errorViewResolvers) {
+        super(errorAttributes, errorViewResolvers);
+        Assert.notNull(errorProperties, "ErrorProperties must not be null");
+        this.errorProperties = errorProperties;
+    }
+  
+    @RequestMapping(produces = MediaType.TEXT_HTML_VALUE)
+    public ModelAndView errorHtml(HttpServletRequest request, HttpServletResponse response) {
+        HttpStatus status = getStatus(request);
+        Map<String, Object> model = Collections
+                .unmodifiableMap(getErrorAttributes(request, getErrorAttributeOptions(request, MediaType.TEXT_HTML)));
+        response.setStatus(status.value());
+        ModelAndView modelAndView = resolveErrorView(request, response, status, model);
+        
+        return (modelAndView != null) ? modelAndView : new ModelAndView("error", model);
+    }
+  
+    @RequestMapping
+    public ResponseEntity<Map<String, Object>> error(HttpServletRequest request) {
+        HttpStatus status = getStatus(request);
+        
+        if (status == HttpStatus.NO_CONTENT) {
+            return new ResponseEntity<>(status);
+        }
+        Map<String, Object> body = getErrorAttributes(request, getErrorAttributeOptions(request, MediaType.ALL));
+        
+        return new ResponseEntity<>(body, status);
+    }
+  
+    @ExceptionHandler(HttpMediaTypeNotAcceptableException.class)
+    public ResponseEntity<String> mediaTypeNotAcceptable(HttpServletRequest request) {
+        HttpStatus status = getStatus(request);
+        
+        return ResponseEntity.status(status).build();
+    }
+}
+```
+`@RequestMapping("${server.error.path:${error.path:/error}}")`
+
+`/error` 동일한 경로를 처리하는 `errorHtml()`, `error()` 두 메서드를 확인할 수 있다.
+
+* `errorHtml()` : `produces = MediaType.TEXT_HTML_VALUE` 클라이언트 요청의 Accept 해더 값이 `text/html` 인 경우에는 `errorHtml()`을 호출해서 `view`를 제공한다.
+* `error()` : 그외 경우에 호출되고 `ResponseEntity` 로 `HTTP Body` 에 `JSON 데이터` 를 반환한다.
+
+<br><br>
+
+**스프링 부트의 예외 처리**
+
+앞서 학습했듯이 스프링 부트의 기본 설정은 오류 발생시 `/error` 를 오류 페이지로 요청한다.
+`BasicErrorController` 는 이 경로를 기본으로 받는다. ( `server.error.path 로 수정 가능, 기본 경로 /error` )
+
+`GET http://localhost:8080/api/members/ex`
+
+**주의**
+
+`BasicErrorController` 를 사용하도록 `WebServerCustomizer` 의 `@Component` 를 주석처리 하자.
+
+![img_4.png](img_4.png)
+
+스프링 부트는 `BasicErrorController` 가 제공하는 기본 정보들을 활용해서 오류 API를 생성해준다.
+
+다음 옵션들을 설정하면 더 자세한 오류 정보를 추가할 수 있다.
+```properties
+server.error.include-binding-errors=always
+server.error.include-exception=true
+server.error.include-message=always
+server.error.include-stacktrace=always
+```
+
+**API 예외 처리는 @ExceptionHandler 를 사용하자!**
+
+`BasicErrorController` 는 HTML 페이지를 제공하는 경우에는 매우 편리하다.
+`4xx`, `5xx` 등등 모두 잘 처리해준다. 
+
+그런데 API 오류 처리는 다른 차원의 이야기이다. API 마다, 각각의 컨트롤러나 예외마다 서로 다른 응답 결과를 출력해야 할 수도 있다. 
+
+예를 들어서 회원과 관련된 API에서 예외가 발생할 때 응답과, 상품과 관련된 API에서 발생하는 예외에 따라 그 결과가 달라질 수 있다.
+결과적으로 매우 세밀하고 복잡하다. 
+
+따라서 이 방법은 HTML 화면을 처리할 때 사용하고, API 오류 처리는 `@ExceptionHandler` 를 사용
+
+* 정리
+  * HTML 예외처리 -> `BasicErrorController`
+  * API 예외처리 -> `@ExceptionHandler`
+
 ### HandlerExceptionResolver 시작
 ### HandlerExceptionResolver 활용
 ### ExceptionResolver1
