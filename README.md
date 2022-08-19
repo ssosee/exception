@@ -698,7 +698,107 @@ server.error.include-stacktrace=always
   * API 예외처리 -> `@ExceptionHandler`
 
 ### HandlerExceptionResolver 시작
+> 오류 메시지, 형식등을 API 마다 다르게 처리하고 싶다.!
+
+예외가 발생해서 서블릿을 넘어 WAS 까지 예외가 절단되면 HTTP 상태코드가 500으로 처리된다.
+
+발생하는 예외에 따라서 400, 404 등등 다른 상태코드로 처리하고 싶다.
+
+즉, 오류 메시지, 형식등을 API 마다 다르게 처리하고 싶다.!
+
+예를 들어서 `IllegalArgumentException을` 처리하지 못해서 
+컨트롤러 밖으로 넘어가는 일이 발생하면 HTTP 상태코드를 400으로 처리하고 싶다.
+
+**ApiExceptionController - 수정**
+```java
+    @GetMapping("/api/members/{id}")
+    public MemberDto getMember(@PathVariable("id") String id) {
+        if(id.equals("ex")) {
+            throw new RuntimeException("잘못된 사용자");
+        }
+        if(id.equals("bad")) {
+            throw new IllegalArgumentException("잘못된 입력 값");
+        }
+        return new MemberDto(id, "hello "+id);
+    }
+```
+<br>
+
+실행하면 상태코드가 500인 것을 확인 할 수 있다.
+```json
+{
+   "status": 500,
+   "error": "Internal Server Error",
+   "exception": "java.lang.IllegalArgumentException",
+   "path": "/api/members/bad"
+}
+```
+<br><br>
+
+**HandlerExceptionResolver**
+
+> 컨트롤러 밖으로 던져진 예외 해결해줘!!
+
+스프링 MVC는 컨트롤러(핸들러) 밖으로 예외가 던져진 경우 예외를 해결하고, 동작을 새로 정의할 수 있는 방법을 제공한다..!
+**컨트롤러 밖으로 던져진 예외를 해결하고, 동작 방식을 변경하고 싶으면 `HandlerExceptionResolver (ExceptionResolver)` 를 사용**하면 된다.
+
+**ExceptionResolver 사용전**
+![img_5.png](img_5.png)
+
+**ExceptionResolver 적용 후**
+![img_6.png](img_6.png)
+
+**`ExceptionResolver` 적용해도 `postHandle()`은 호출되지 않는다.**
+
+**HandlerExceptionResolver - 인터페이스**
+```java
+public interface HandlerExceptionResolver {
+   ModelAndView resolveException(
+           HttpServletRequest request, HttpServletResponse response, 
+            Object handler, Exception ex);
+}
+```
+* `handler` : 핸들러(컨트롤러) 정보
+* `Exception ex` : 핸들러(컨트롤러)에서 발생한 발생한 예외
+
+`HandlerExceptionResolver` 인터페이스를 상속받아서 `MyHandlerExceptionResolver를` 구현하자.
+
+**MyHandlerExceptionResolver**
+```java
+@Slf4j
+public class MyHandlerExceptionResolver implements HandlerExceptionResolver {
+  @Override
+  public ModelAndView resolveException(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) {
+    //ex의 클래스 타입 확인
+    if (ex instanceof IllegalArgumentException) {
+      try {
+        log.info("IllegalArgumentException resolver to 400");
+        response.sendError(HttpServletResponse.SC_BAD_REQUEST, ex.getMessage());
+        return new ModelAndView();
+      } catch (IOException e) {
+        log.error("resolver ex", e);
+      }
+    }
+
+    return null;
+  }
+}
+```
+* `HandlerExceptionResolver` 가 `ModelAndView` 를 반환하는 이유는 
+마치 `try ~ catch` 를 하듯이, `Exception` 을 처리해서 정상 흐름 처럼 변경하는 것이 목적이다.
+  * `IllegalArgumentException` 이 발생하면 `response.sendError(400)` 를 호출해서 HTTP
+    상태 코드를 400으로 지정하고, 빈 ModelAndView 를 반환
+<br><br>
+
+**`HandlerExceptionResolver` 의 반환 값에 따른 `DispatcherServlet` 의 동작 방식**
+
+* `빈 ModelAndView`: `new ModelAndView()` 처럼 빈 `ModelAndView` 를 반환하면 뷰를 렌더링 하지 않고, 정상 흐름으로 서블릿이 리턴
+* `ModelAndView 지정`: `ModelAndView` 에 `View`, `Model` 등의 정보를 지정해서 반환하면 뷰를 렌더링 한다.
+* `null`: : `null` 을 반환하면, 다음 `ExceptionResolver` 를 찾아서 실행한다. 만약 처리할 수 있는
+  `ExceptionResolver` 가 없으면 예외 처리가 안되고, 기존에 발생한 예외를 서블릿 밖으로 던진다.
+
 ### HandlerExceptionResolver 활용
+
 ### ExceptionResolver1
 ### ExceptionResolver2
 ### @ExceptionHandler
