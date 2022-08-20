@@ -25,7 +25,10 @@ public class UserHandlerExceptionResolver implements HandlerExceptionResolver {
                 log.info("UserException resolver to 400");
                 String acceptHeader = request.getHeader("accept");
                 response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-
+                /**
+                 * HTTP 요청 해더의 ACCEPT 값이 application/json 이면 JSON으로 오류를 내려주고,
+                 * 그 외 경우에는 error/500에 있는 HTML 오류 페이지를 보여준다
+                 */
                 if("application/json".equals(acceptHeader)) {
                     Map<String, Object> errorResult = new HashMap<>();
                     errorResult.put("ex", ex.getMessage());
